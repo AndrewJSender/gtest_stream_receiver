@@ -4,6 +4,12 @@ This server accepts GoogleTest streaming TCP lines.
 
 Each TCP connection is treated as one independent test session.
 
+## Disclaimer
+
+This project was built with AI assistance.
+
+> "Built with curiosity, tested with care. — GitHub Copilot"
+
 ## 1) Run the server
 
 ```bash
