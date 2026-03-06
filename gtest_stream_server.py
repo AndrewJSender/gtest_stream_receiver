@@ -53,6 +53,13 @@ class SessionTestState:
     status: str | None = None
 
 
+@dataclass
+class SuiteOutputState:
+    expected_count: int | None = None
+    finished_count: int = 0
+    total_ms: int = 0
+
+
 class ResultStore:
     def __init__(self, out_dir: Path, session_id: int, client: str, jsonl_name: str = "events.jsonl") -> None:
         self._lock = threading.Lock()
@@ -63,6 +70,8 @@ class ResultStore:
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.events_file = self.out_dir / jsonl_name
         self.summary_file = self.out_dir / "summary.json"
+        self.output_file = self.out_dir / "output.txt"
+        self.output_file.write_text("", encoding="utf-8")
 
         self._stats = StreamStats(
             session_id=session_id,
@@ -73,6 +82,8 @@ class ResultStore:
         self._started_tests: List[SessionTestState] = []
         self._finished_tests: List[SessionTestState] = []
         self._current_case_name: str | None = None
+        self._suite_output_state: Dict[str, SuiteOutputState] = {}
+        self._has_output_content = False
 
     def append_event(self, event: Dict[str, Any]) -> None:
         with self._lock:
@@ -91,6 +102,7 @@ class ResultStore:
         test_name = self._extract_test_name(params)
         duration_from_payload = self._extract_duration_seconds(params)
         now_mono = event.get("monotonic", monotonic())
+        output_lines: List[str] = []
 
         if event_name in {"testprogramstart", "test_program_start"}:
             self._stats.test_program_start += 1
@@ -98,16 +110,45 @@ class ResultStore:
             self._stats.test_program_end += 1
         elif event_name in {"testcasestart", "test_case_start"}:
             self._current_case_name = self._extract_case_name(params)
+            if self._current_case_name:
+                expected_count = self._extract_test_count(params)
+                self._suite_output_state[self._current_case_name] = SuiteOutputState(expected_count=expected_count)
+
+                if self._has_output_content:
+                    output_lines.append("")
+                self._has_output_content = True
+
+                header_count = str(expected_count) if expected_count is not None else "?"
+                noun = "test" if expected_count == 1 else "tests"
+                output_lines.append(f"[----------] {header_count} {noun} from {self._current_case_name}")
         elif event_name in {"testcaseend", "test_case_end"}:
+            ended_case = self._extract_case_name(params) or self._current_case_name
+            if ended_case:
+                suite_state = self._suite_output_state.get(ended_case)
+                if suite_state:
+                    noun = "test" if suite_state.finished_count == 1 else "tests"
+                    output_lines.append(
+                        f"[----------] {suite_state.finished_count} {noun} from {ended_case} "
+                        f"({suite_state.total_ms} ms total)"
+                    )
             self._current_case_name = None
         elif event_name in {"teststart", "test_start"}:
             self._stats.test_start += 1
             test_name = self._normalize_test_name(test_name)
             if test_name:
+                suite_name, _ = self._split_test_name(test_name)
+                if suite_name not in self._suite_output_state:
+                    self._suite_output_state[suite_name] = SuiteOutputState(expected_count=None)
+                    if self._has_output_content:
+                        output_lines.append("")
+                    self._has_output_content = True
+                    output_lines.append(f"[----------] ? tests from {suite_name}")
+
                 state = SessionTestState(name=test_name)
                 state.started_mono = now_mono
                 self._tests.append(state)
                 self._started_tests.append(state)
+                output_lines.append(f"[ RUN      ] {state.name}")
         elif event_name in {"testend", "test_end"}:
             self._stats.test_end += 1
             state = self._match_test_end_state(test_name)
@@ -121,6 +162,32 @@ class ResultStore:
                 if status:
                     state.status = status
                 self._finished_tests.append(state)
+
+                duration_ms = self._duration_to_ms(state.duration_seconds)
+                if status in {"success", "passed", "pass", "ok"}:
+                    output_lines.append(f"[       OK ] {state.name} ({duration_ms} ms)")
+                else:
+                    output_lines.append(f"[  FAILED  ] {state.name} ({duration_ms} ms)")
+
+                suite_name, _ = self._split_test_name(state.name)
+                suite_state = self._suite_output_state.setdefault(suite_name, SuiteOutputState())
+                suite_state.finished_count += 1
+                suite_state.total_ms += duration_ms
+        elif event_name in {"testpartresult", "test_part_result"}:
+            file_path = str(params.get("file", "")).strip()
+            line_no = str(params.get("line", "")).strip()
+            message = str(params.get("message", "")).rstrip()
+
+            if file_path:
+                if line_no:
+                    output_lines.append(f"{file_path}:{line_no}: Failure")
+                else:
+                    output_lines.append(f"{file_path}: Failure")
+            else:
+                output_lines.append("Failure")
+
+            if message:
+                output_lines.extend(message.splitlines())
         else:
             self._stats.unknown_events += 1
 
@@ -129,6 +196,9 @@ class ResultStore:
                 self._stats.test_pass += 1
             elif status in {"failure", "failed", "fail", "notrun", "timeout"}:
                 self._stats.test_fail += 1
+
+        if output_lines:
+            self._append_output_lines(output_lines)
 
     def finalize_session(self) -> Dict[str, Any]:
         with self._lock:
@@ -162,6 +232,75 @@ class ResultStore:
 
             self._write_summary()
             return asdict(self._stats)
+
+    def _append_output_lines(self, lines: List[str]) -> None:
+        with self.output_file.open("a", encoding="utf-8") as file_handle:
+            for line in lines:
+                file_handle.write(line + "\n")
+
+    def _write_gtest_output(self) -> None:
+        suites: Dict[str, List[SessionTestState]] = {}
+
+        for state in self._finished_tests:
+            suite_name, _ = self._split_test_name(state.name)
+            suites.setdefault(suite_name, []).append(state)
+
+        lines: List[str] = []
+        first_suite = True
+        for suite_name, tests in suites.items():
+            if not first_suite:
+                lines.append("")
+            first_suite = False
+
+            lines.append(f"[----------] {len(tests)} test{'s' if len(tests) != 1 else ''} from {suite_name}")
+
+            suite_total_ms = 0
+            for state in tests:
+                status = (state.status or "").lower()
+                duration_ms = self._duration_to_ms(state.duration_seconds)
+                suite_total_ms += duration_ms
+
+                lines.append(f"[ RUN      ] {state.name}")
+                if status in {"success", "passed", "pass", "ok"}:
+                    lines.append(f"[       OK ] {state.name} ({duration_ms} ms)")
+                else:
+                    lines.append(f"[  FAILED  ] {state.name} ({duration_ms} ms)")
+
+            lines.append(
+                f"[----------] {len(tests)} test{'s' if len(tests) != 1 else ''} "
+                f"from {suite_name} ({suite_total_ms} ms total)"
+            )
+
+        output_text = "\n".join(lines)
+        if output_text:
+            output_text += "\n"
+        self.output_file.write_text(output_text, encoding="utf-8")
+
+    @staticmethod
+    def _split_test_name(test_name: str) -> tuple[str, str]:
+        if "." in test_name:
+            suite_name, case_name = test_name.split(".", 1)
+            return suite_name, case_name
+        return "UnknownTestSuite", test_name
+
+    @staticmethod
+    def _duration_to_ms(duration_seconds: float | None) -> int:
+        if duration_seconds is None:
+            return 0
+        return int(round(duration_seconds * 1000.0))
+
+    @staticmethod
+    def _extract_test_count(params: Dict[str, Any]) -> int | None:
+        for key in ("tests", "test_count", "total_test_count"):
+            if key not in params:
+                continue
+            try:
+                value = int(str(params[key]).strip())
+                if value >= 0:
+                    return value
+            except ValueError:
+                continue
+        return None
 
     @staticmethod
     def _extract_test_name(params: Dict[str, Any]) -> str | None:
@@ -347,7 +486,7 @@ def main() -> None:
     tcp_server = GTestTCPServer((args.host, args.port), out_dir, args.jsonl_name)
     print(f"Listening on tcp://{args.host}:{args.port}")
     print(f"Saving per-connection sessions under: {out_dir}")
-    print("Each session writes: events.jsonl + summary.json")
+    print("Each session writes: events.jsonl + output.txt + summary.json")
     print("Protocol: raw TCP lines from GoogleTest stream_result_to")
 
     try:

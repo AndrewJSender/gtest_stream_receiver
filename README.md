@@ -33,6 +33,7 @@ After stream data arrives, the server writes one folder per connection under `--
 
 - `data/session_000001_YYYYMMDD_HHMMSS_<client>/events.jsonl`: one JSON object per stream line/event
 - `data/session_000001_YYYYMMDD_HHMMSS_<client>/summary.json`: final summary generated when that connection disconnects
+- `data/session_000001_YYYYMMDD_HHMMSS_<client>/output.txt`: GoogleTest-style text report appended in real time as events arrive
 
 The final `summary.json` includes:
 
