@@ -18,11 +18,10 @@ python3 gtest_stream_server.py --host 0.0.0.0 --port 8080 --out-dir ./data
 
 ## 2) Configure your test binary
 
-Set `GTEST_OUTPUT` to stream to this server:
+Pass the gtest streaming flag to stream to this server:
 
 ```bash
-export GTEST_OUTPUT="stream_result_to=127.0.0.1:8080"
-./your_gtest_binary
+./your_gtest_binary --gtest_stream_result_to=127.0.0.1:8080
 ```
 
 If your test process runs on another machine, use the server machine IP.
