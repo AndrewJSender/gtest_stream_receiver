@@ -1,0 +1,17 @@
+{
+  "configurations": [
+    {
+      "name": "server",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "gtest_stream_server.py",
+      "console": "integratedTerminal",
+      "args": [
+        // "--host", "localhost",
+        // "--port", "8080",
+        "--jsonl-name=events.jsonl",
+        "--sqlite-db",
+      ]
+    }
+  ]
+}

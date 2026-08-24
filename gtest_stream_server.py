@@ -15,6 +15,7 @@ import json
 import re
 import socketserver
 import threading
+import sqlite3
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -61,17 +62,24 @@ class SuiteOutputState:
 
 
 class ResultStore:
-    def __init__(self, out_dir: Path, session_id: int, client: str, jsonl_name: str = "events.jsonl") -> None:
+    def __init__(self, out_dir: Path, session_id: int, client: str, jsonl_name: str, sqlite_db: bool = False) -> None:
         self._lock = threading.Lock()
         safe_client = re.sub(r"[^0-9A-Za-z_.-]", "_", client)
         session_time = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         self.out_dir = out_dir / f"session_{session_id:06d}_{session_time}_{safe_client}"
         self.out_dir.mkdir(parents=True, exist_ok=True)
-        self.events_file = self.out_dir / jsonl_name
+        if jsonl_name:
+            self.events_file = self.out_dir / jsonl_name
         self.summary_file = self.out_dir / "summary.json"
         self.output_file = self.out_dir / "output.txt"
         self.output_file.write_text("", encoding="utf-8")
+
+        if sqlite_db:
+            self.sqlite_conn = sqlite3.connect(self.out_dir / "data.db")
+            self._create_tables()
+        else:
+            self.sqlite_conn = None
 
         self._stats = StreamStats(
             session_id=session_id,
@@ -85,12 +93,99 @@ class ResultStore:
         self._suite_output_state: Dict[str, SuiteOutputState] = {}
         self._has_output_content = False
 
+    def append_result(self, result: Dict[str, Any]) -> None:
+        if self.sqlite_conn:
+            cursor = self.sqlite_conn.cursor()
+            cursor.execute(
+                "INSERT INTO results (session_id, suite_name, test_name, status, elapsed_time) VALUES (?, ?, ?, ?, ?)",
+                (
+                    self._stats.session_id,
+                    result["suite_name"],
+                    result["test_name"],
+                    result["status"],
+                    result.get("elapsed_time"),
+                ),
+            )
+            self.sqlite_conn.commit()
+
+    def append_sql_event(self, event) -> None:
+        cursor = self.sqlite_conn.cursor()
+        cursor.execute(
+            "INSERT INTO events (received_at, method, client, params, raw_line, monotonic) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                event["received_at"],
+                event["method"],
+                event["client"],
+                json.dumps(event.get("params", {}), ensure_ascii=False),
+                event.get("raw_line"),
+                event.get("monotonic"),
+            ),
+        )
+        self.sqlite_conn.commit()
+
     def append_event(self, event: Dict[str, Any]) -> None:
         with self._lock:
-            with self.events_file.open("a", encoding="utf-8") as file_handle:
-                file_handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+            if hasattr(self, "events_file"):
+                with self.events_file.open("a", encoding="utf-8") as file_handle:
+                    file_handle.write(json.dumps(event, ensure_ascii=False) + "\n")
 
-            self._update_stats(event)
+        if self.sqlite_conn:
+            self.append_sql_event(event)
+        self._update_stats(event)
+
+    def _create_tables(self) -> None:
+        if not self.sqlite_conn:
+            return
+        events_table_sql = """
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            received_at TEXT NOT NULL,
+            method TEXT NOT NULL,
+            client TEXT NOT NULL,
+            params TEXT,
+            raw_line TEXT,
+            monotonic REAL
+        )
+        """
+
+        results_table_sql = """
+        CREATE TABLE IF NOT EXISTS results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            suite_name TEXT NOT NULL,
+            test_name TEXT NOT NULL,
+            status TEXT NOT NULL,
+            elapsed_time REAL,
+            received_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY(session_id) REFERENCES sessions(id)
+        )
+        """
+
+        summary_table_sql = """
+        CREATE TABLE IF NOT EXISTS summary (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            total_events INTEGER,
+            test_program_start INTEGER,
+            test_program_end INTEGER,
+            test_start INTEGER,
+            test_end INTEGER,
+            test_pass INTEGER,
+            test_fail INTEGER,
+            test_unfinished INTEGER,
+            unknown_events INTEGER,
+            last_event_time TEXT,
+            passed_tests TEXT,
+            failed_tests TEXT,
+            unfinished_tests TEXT,
+            FOREIGN KEY(session_id) REFERENCES sessions(id)
+        )
+        """
+        cursor = self.sqlite_conn.cursor()
+        cursor.execute(events_table_sql)
+        cursor.execute(results_table_sql)
+        cursor.execute(summary_table_sql)
+        self.sqlite_conn.commit()
 
     def _update_stats(self, event: Dict[str, Any]) -> None:
         self._stats.total_events += 1
@@ -131,9 +226,17 @@ class ResultStore:
                         f"[----------] {suite_state.finished_count} {noun} from {ended_case} "
                         f"({suite_state.total_ms} ms total)"
                     )
+                result_row = {
+                    "suite_name": self._current_case_name,
+                    "test_name": self._current_test_name,
+                    "status": status,
+                    "elapsed_time": suite_state.total_ms,
+                }
+                self.append_result(result_row)
             self._current_case_name = None
         elif event_name in {"teststart", "test_start"}:
             self._stats.test_start += 1
+            self._current_test_name = test_name
             test_name = self._normalize_test_name(test_name)
             if test_name:
                 suite_name, _ = self._split_test_name(test_name)
@@ -447,10 +550,11 @@ class GTestTCPHandler(socketserver.StreamRequestHandler):
 class GTestTCPServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
 
-    def __init__(self, server_address: tuple[str, int], out_dir: Path, jsonl_name: str):
+    def __init__(self, server_address: tuple[str, int], out_dir: Path, jsonl_name: str, sqlite_db: bool = False) -> None:
         super().__init__(server_address, GTestTCPHandler)
         self.out_dir = out_dir
         self.jsonl_name = jsonl_name
+        self.sqlite_db = sqlite_db
         self._session_id_seq = 0
         self._session_id_lock = threading.Lock()
 
@@ -458,7 +562,7 @@ class GTestTCPServer(socketserver.ThreadingTCPServer):
         with self._session_id_lock:
             self._session_id_seq += 1
             session_id = self._session_id_seq
-        return ResultStore(self.out_dir, session_id, client, jsonl_name=self.jsonl_name)
+        return ResultStore(self.out_dir, session_id, client, jsonl_name=self.jsonl_name, sqlite_db=self.sqlite_db)
 
 
 def parse_args() -> argparse.Namespace:
@@ -472,8 +576,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--jsonl-name",
-        default="events.jsonl",
-        help="Per-session events JSONL file name (default: events.jsonl)",
+        help="Per-session events JSONL file name",
+    )
+    parser.add_argument(
+        "--sqlite-db",
+        action='store_true',
+        help="Store events in a SQLite database file",
     )
     return parser.parse_args()
 
@@ -483,7 +591,7 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    tcp_server = GTestTCPServer((args.host, args.port), out_dir, args.jsonl_name)
+    tcp_server = GTestTCPServer((args.host, args.port), out_dir, args.jsonl_name, args.sqlite_db)
     print(f"Listening on tcp://{args.host}:{args.port}")
     print(f"Saving per-connection sessions under: {out_dir}")
     print("Each session writes: events.jsonl + output.txt + summary.json")
