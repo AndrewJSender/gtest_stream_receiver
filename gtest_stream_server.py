@@ -11,28 +11,29 @@
 GoogleTest can stream test progress/results to a web server using:
     GTEST_OUTPUT="stream_result_to=HOST:PORT"
 
-This server listens for those HTTP requests, records each event, and writes
-an append-only JSONL log plus a rolling summary.
+This server listens for those TCP requests, records each event to jsonl or sqlite db
 """
 
 from __future__ import annotations
 
 import argparse
+from ast import Dict, List
+from datetime import datetime, timezone
 import logging
 import socketserver
 import threading
-from datetime import datetime
 from pathlib import Path
 from time import monotonic
+from typing import Any
 from urllib.parse import parse_qs
 
-from result_store import ResultStore, _utc_now, _flatten_query_dict
+from result_store import ResultStore
 
 
 class GTestTCPHandler(socketserver.StreamRequestHandler):
     def handle(self) -> None:
         client = f"{self.client_address[0]}:{self.client_address[1]}"
-        store = self.server.create_session_store(client)
+        store = self.server.create_session_store()
         logging.info(f"{client} - connected")
 
         while True:
@@ -42,6 +43,7 @@ class GTestTCPHandler(socketserver.StreamRequestHandler):
 
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line:
+                logging.warning(f"{client} - received empty line, skipping")
                 continue
 
             params = _flatten_query_dict(parse_qs(line, keep_blank_values=True))
@@ -50,74 +52,87 @@ class GTestTCPHandler(socketserver.StreamRequestHandler):
                 params = {key: value}
 
             event = {
-                "received_at": _utc_now(),
-                "method": "TCP",
+                "utc": _utc_now(),
+                "monotonic": monotonic(),
+                "session_id": store.session_id,
                 "client": client,
                 "params": params,
-                "raw_line": line,
-                "monotonic": monotonic(),
             }
             store.append_event(event)
 
-        summary = store.finalize_session()
         logging.info(f"{client} - disconnected")
-        summary_msg = f"{client} - summary: passed={len(summary['passed_tests'])}, failed={len(summary['failed_tests'])}, events={summary['total_events']}"
 
-        if "unfinished_tests" in summary:
-            summary_msg += f", unfinished={len(summary['unfinished_tests'])}"
-        logging.info(summary_msg)
+def _flatten_query_dict(query_dict: Dict[str, List[str]]) -> Dict[str, Any]:
+    flat: Dict[str, Any] = {}
+    for key, values in query_dict.items():
+        if not values:
+            continue
+        flat[key] = values[0] if len(values) == 1 else values
+    return flat
 
-
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 class GTestTCPServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
-
-    def __init__(self, server_address: tuple[str, int], out_dir: Path, jsonl_name: str, sqlite_db: bool = False) -> None:
+    def __init__(self, server_address: tuple[str, int], out_dir: Path, jsonl: str, sqlite_db: bool = False) -> None:
         super().__init__(server_address, GTestTCPHandler)
         self.out_dir = out_dir
-        self.jsonl_name = jsonl_name
+        self.jsonl = jsonl
         self.sqlite_db = sqlite_db
         self._session_id_seq = 0
         self._session_id_lock = threading.Lock()
 
-    def create_session_store(self, client: str) -> ResultStore:
+    def create_session_store(self) -> ResultStore:
         with self._session_id_lock:
             self._session_id_seq += 1
             session_id = self._session_id_seq
-        return ResultStore(self.out_dir, session_id, client, jsonl_name=self.jsonl_name, sqlite_db=self.sqlite_db)
+        return ResultStore(self.out_dir, session_id, jsonl=self.jsonl, sqlite_db=self.sqlite_db)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Receive and store GoogleTest streaming results")
-    parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8080, help="Bind port (default: 8080)")
+    parser = argparse.ArgumentParser(description="Receive and store GoogleTest streaming results", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("--log_level", nargs="?", type=str, default="ERROR", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Logging level")
+    parser.add_argument("--host", default="0.0.0.0", help="Bind host")
+    parser.add_argument("--port", type=int, default=8080, help="Bind port")
     parser.add_argument(
         "--out-dir",
         default="./data",
         help="Directory to save output files (default: ./data)",
     )
     parser.add_argument(
-        "--jsonl-name",
-        help="Per-session events JSONL file name",
+        "--jsonl",
+        action="store_true",
+        help="Store events in a JSONL file (one JSON object per line)",
     )
     parser.add_argument(
         "--sqlite-db",
         action='store_true',
         help="Store events in a SQLite database file",
     )
+
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    log_level = getattr(logging, args.log_level.upper(), logging.INFO)
+    logging.basicConfig(level=log_level, format="%(asctime)s [%(levelname)s] %(message)s")
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    tcp_server = GTestTCPServer((args.host, args.port), out_dir, args.jsonl_name, args.sqlite_db)
+    tcp_server = GTestTCPServer((args.host, args.port), out_dir, args.jsonl, args.sqlite_db)
     logging.info(f"Listening on tcp://{args.host}:{args.port}")
     logging.info(f"Saving per-connection sessions under: {out_dir}")
-    logging.info("Each session writes: events.jsonl + output.txt + summary.json")
+    files = []
+    if args.jsonl:
+        files.append("events.jsonl")
+    if args.sqlite_db:
+        files.append("events.db")
+    if not files:
+        logging.error("No output files specified. Use --jsonl and/or --sqlite-db to store events.")
+        return
+    logging.info(f"Each session will write: {', '.join(files)}")
     logging.info("Protocol: raw TCP lines from GoogleTest stream_result_to")
 
     try:
