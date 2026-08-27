@@ -8,12 +8,6 @@
 
 
 """Process Google Test Stream Events
-
-Raises:
-    f: _description_
-
-Returns:
-    _type_: _description_
 """
 
 from __future__ import annotations
@@ -24,8 +18,9 @@ from xml.etree import ElementTree as ET
 from enum import StrEnum
 from typing import Any, Dict
 from pathlib import Path
+import logging
 
-
+import my_logging
 
 class EventType(StrEnum):
     """
@@ -97,7 +92,8 @@ class Processor:
         return elem
 
     def output_json(self, session: Dict, path: Path):
-        with open(path, "w") as file:
+        session_path = path.parent / f"{path.stem}.session_{session['name']}{path.suffix}"
+        with open(session_path, "w") as file:
             json.dump(session, file)
 
     def output_xml(self, session: Dict, path: Path):
@@ -174,16 +170,17 @@ class Processor:
 def parse_args() -> Any:
     import argparse
 
-    parser = argparse.ArgumentParser(description="Process GoogleTest streaming events.")
+    parser = argparse.ArgumentParser(description="Process GoogleTest streaming events.", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    my_logging.add_argument(parser)
     parser.add_argument("--jsonl-path", help="Path to the JSONL file containing events.")
     parser.add_argument("--db-path", help="Path to the SQLite database file (optional).")
-    parser.add_argument("--output-json-path", help="Path to the output json file.")
-    parser.add_argument("--output-xml-path", help="Path to the output json file.")
+    parser.add_argument("--output-json-path", type=Path, help="Path to the output json file.")
+    parser.add_argument("--output-xml-path", type=Path, help="Path to the output json file.")
     return parser.parse_args()
 
 def main() -> None:
     args = parse_args()
-
+    my_logging.configure(args)
     processor = Processor()
     if args.jsonl_path:
         with open(args.jsonl_path, "r", encoding="utf-8") as f:
@@ -204,8 +201,10 @@ def main() -> None:
             event['params'] = json.loads(event['params'])
             processor.process_event(event, args.output_json_path, args.output_xml_path)
 
-
-    print(processor.sessions)
+    if len(processor.sessions):
+        logging.warning("test sessions not fully processed")
+    else:
+        logging.info("all test sessions fully processed")
 
 if __name__ == "__main__":
     main()

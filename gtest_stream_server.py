@@ -28,13 +28,14 @@ from typing import Any
 from urllib.parse import parse_qs
 
 from result_store import ResultStore
+import my_logging
 
 
 class GTestTCPHandler(socketserver.StreamRequestHandler):
     def handle(self) -> None:
         client = f"{self.client_address[0]}:{self.client_address[1]}"
         store = self.server.create_session_store()
-        logging.info(f"{client} - connected")
+        logging.info(f"{client} - session {store.session_id} - connected")
 
         while True:
             raw_line = self.rfile.readline()
@@ -60,7 +61,7 @@ class GTestTCPHandler(socketserver.StreamRequestHandler):
             }
             store.append_event(event)
 
-        logging.info(f"{client} - disconnected")
+        logging.info(f"{client} - session {store.session_id} - disconnected")
 
 def _flatten_query_dict(query_dict: Dict[str, List[str]]) -> Dict[str, Any]:
     flat: Dict[str, Any] = {}
@@ -92,7 +93,7 @@ class GTestTCPServer(socketserver.ThreadingTCPServer):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Receive and store GoogleTest streaming results", formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--log_level", nargs="?", type=str, default="ERROR", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Logging level")
+    my_logging.add_argument(parser)
     parser.add_argument("--host", default="0.0.0.0", help="Bind host")
     parser.add_argument("--port", type=int, default=8080, help="Bind port")
     parser.add_argument(
@@ -116,8 +117,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    log_level = getattr(logging, args.log_level.upper(), logging.INFO)
-    logging.basicConfig(level=log_level, format="%(asctime)s [%(levelname)s] %(message)s")
+    my_logging.configure(args)
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
