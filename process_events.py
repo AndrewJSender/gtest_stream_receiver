@@ -19,6 +19,7 @@ Returns:
 from __future__ import annotations
 
 import json
+import sqlite3
 from xml.etree import ElementTree as ET
 from enum import StrEnum
 from typing import Any, Dict
@@ -56,6 +57,9 @@ class Processor:
     elapsed_time_key = "elapsed_time"
     started_key = "started"
     ended_key = "ended"
+    iterations_key = "iterations"
+    suites_key = "suite"
+    tests_key = "test"
 
     def __init__(self):
         self.sessions: Dict = {}
@@ -96,7 +100,10 @@ class Processor:
         with open(path, "w") as file:
             json.dump(session, file)
 
-    def process_event(self, event: Dict[str, Any]) -> None:
+    def output_xml(self, session: Dict, path: Path):
+        pass
+
+    def process_event(self, event: Dict[str, Any], output_json, output_xml) -> None:
         session_id = event["session_id"]
         mono = event["monotonic"]
         utc = event["utc"]
@@ -111,54 +118,58 @@ class Processor:
         match event_name:
             case EventType.PROGRAM_START:
                 new_session = self.started(session_id, mono, utc)
-                new_session.update({"iterations": []})
+                new_session.update({self.iterations_key: []})
                 self.sessions[session_id] = new_session
             case EventType.PROGRAM_END:
                 current_session = self.sessions.pop(session_id)
                 passed = bool(params[self.passed_key])
                 elapsed_time = None
                 current_session.update(self.ended(passed, elapsed_time, mono, utc))
-                self.output_json(current_session, "session_output.json")
+                if output_json:
+                    self.output_json(current_session, output_json)
+                if output_xml:
+                    self.output_xml(current_session, output_xml)
             case EventType.ITERATION_START:
                 iteration_idx = params["iteration"]
                 new_iteration = self.started(iteration_idx, mono, utc)
+                new_iteration[self.suites_key] = []
                 current_session = self.sessions[session_id]
-                current_session["iterations"].append(new_iteration)
+                current_session[self.iterations_key].append(new_iteration)
             case EventType.ITERATION_END:
                 current_session = self.sessions[session_id]
-                last_iteration = current_session["iterations"][-1]
+                last_iteration = current_session[self.iterations_key][-1]
                 passed = bool(params[self.passed_key])
                 elapsed_time = params[self.elapsed_time_key]
                 last_iteration.update(self.ended(passed, elapsed_time, mono, utc))
-            # case EventType.CASE_START:
-            #     current_session = self.sessions[session_id]
-            #     last_iteration = current_session.iterations[-1]
-            #     suite = Suite(params["name"], mono, utc)
-            #     last_iteration.add_suite(suite)
-            # case EventType.CASE_END:
-            #     current_session = self.sessions[session_id]
-            #     last_iteration = current_session.iterations[-1]
-            #     last_suite = last_iteration.suites[-1]
-            #     passed = bool(params[self.passed_key])
-            #     elapsed_time = params[self.elapsed_time_key]
-            #     last_suite.ended(passed, elapsed_time, mono, utc)
-            # case EventType.TEST_START:
-            #     current_session = self.sessions[session_id]
-            #     last_iteration = current_session.iterations[-1]
-            #     last_suite = last_iteration.suites[-1]
-            #     test = Test(params["name"], mono, utc)
-            #     last_suite.add_test(test)
-            # case EventType.TEST_END:
-            #     current_session = self.sessions[session_id]
-            #     last_iteration = current_session.iterations[-1]
-            #     last_suite = last_iteration.suites[-1]
-            #     last_test = last_suite.tests[-1]
-            #     passed = bool(params[self.passed_key])
-            #     elapsed_time = params[self.elapsed_time_key]
-            #     last_test.ended(passed, elapsed_time, mono, utc)
+            case EventType.CASE_START:
+                current_session = self.sessions[session_id]
+                last_iteration = current_session[self.iterations_key][-1]
+                new_suite = self.started(params["name"], mono, utc)
+                new_suite[self.tests_key] = []
+                last_iteration[self.suites_key].append(new_suite)
+            case EventType.CASE_END:
+                current_session = self.sessions[session_id]
+                last_iteration = current_session[self.iterations_key][-1]
+                last_suite = last_iteration[self.suites_key][-1]
+                passed = bool(params[self.passed_key])
+                elapsed_time = params[self.elapsed_time_key]
+                last_suite.update(self.ended(passed, elapsed_time, mono, utc))
+            case EventType.TEST_START:
+                current_session = self.sessions[session_id]
+                last_iteration = current_session[self.iterations_key][-1]
+                last_suite = last_iteration[self.suites_key][-1]
+                new_test = self.started(params["name"], mono, utc)
+                last_suite[self.tests_key].append(new_test)
+            case EventType.TEST_END:
+                current_session = self.sessions[session_id]
+                last_iteration = current_session[self.iterations_key][-1]
+                last_suite = last_iteration[self.suites_key][-1]
+                last_test = last_suite[self.tests_key][-1]
+                passed = bool(params[self.passed_key])
+                elapsed_time = params[self.elapsed_time_key]
+                last_test.update(self.ended(passed, elapsed_time, mono, utc))
             case _:
-                pass
-                # raise f"Unknown Event Type: {event_name}"
+                raise f"Unknown Event Type: {event_name}"
 
 def parse_args() -> Any:
     import argparse
@@ -174,10 +185,25 @@ def main() -> None:
     args = parse_args()
 
     processor = Processor()
-    with open(args.jsonl_path, "r", encoding="utf-8") as f:
-        for line in f:
-            event = json.loads(line)
-            processor.process_event(event)
+    if args.jsonl_path:
+        with open(args.jsonl_path, "r", encoding="utf-8") as f:
+            for line in f:
+                event = json.loads(line)
+                processor.process_event(event, args.output_json_path, args.output_xml_path)
+
+    if args.db_path:
+        sqlite_conn = sqlite3.connect(args.db_path)
+        sql_cmd = "SELECT * FROM events"
+        cursor = sqlite_conn.cursor()
+        cursor.execute(sql_cmd)
+        rows = cursor.fetchall()
+        columns = [col[0] for col in cursor.description]
+        sqlite_conn.close()
+        results = [dict(zip(columns, row)) for row in rows]
+        for event in results:
+            event['params'] = json.loads(event['params'])
+            processor.process_event(event, args.output_json_path, args.output_xml_path)
+
 
     print(processor.sessions)
 

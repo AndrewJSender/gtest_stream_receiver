@@ -23,8 +23,9 @@
       "console": "integratedTerminal",
       "args": [
         // "--help",
-        "--jsonl-path", "data/events.jsonl",
-        // "--db-path", "events.db",
+        // "--jsonl-path=data/events.jsonl",
+        "--db-path=data/events.db",
+        "--output-json-path=data/output.json",
       ]
     }
   ]
