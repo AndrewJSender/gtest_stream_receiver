@@ -53,8 +53,8 @@ class Processor:
     started_key = "started"
     ended_key = "ended"
     iterations_key = "iterations"
-    suites_key = "suite"
-    tests_key = "test"
+    suites_key = "suites"
+    tests_key = "tests"
 
     def __init__(self):
         self.sessions: Dict = {}
@@ -78,26 +78,32 @@ class Processor:
             }
         }
 
-    def dict_to_xml(tag, d):
-        """Converts a python dictionary to an XML Element."""
-        elem = ET.Element(tag)
-        for key, val in d.items():
-            child = ET.Element(key)
-            if isinstance(val, dict):
-                # Recursively handle nested dictionaries
-                child.append(self.dict_to_xml(key, val))
-            else:
-                child.text = str(val)
-            elem.append(child)
-        return elem
-
     def output_json(self, session: Dict, path: Path):
         session_path = path.parent / f"{path.stem}.session_{session['name']}{path.suffix}"
         with open(session_path, "w") as file:
             json.dump(session, file)
 
+    def dict_to_xml(self, tag, d):
+        elem = ET.Element(tag)
+        for key, val in d.items():
+            if isinstance(val, dict):
+                # Recursively handle nested dictionaries
+                elem.append(self.dict_to_xml(key, val))
+            elif isinstance(val, list):
+                single_key = key[:-1]
+                elem.extend(self.dict_to_xml(single_key, list_val) for list_val in val)
+            else:
+                # flat -> attribute
+                elem.attrib[key] = str(val)
+        return elem
+
+
     def output_xml(self, session: Dict, path: Path):
-        pass
+        session_path = path.parent / f"{path.stem}.session_{session['name']}{path.suffix}"
+        root = self.dict_to_xml("session", session)
+        tree = ET.ElementTree(root)
+        with open(session_path, "wb") as file:
+            tree.write(file, encoding="utf-8", xml_declaration=True)
 
     def process_event(self, event: Dict[str, Any], output_json, output_xml) -> None:
         session_id = event["session_id"]

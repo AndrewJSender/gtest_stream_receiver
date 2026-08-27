@@ -26,7 +26,8 @@
         // "--log_level=DEBUG",
         // "--jsonl-path=data/events.jsonl",
         "--db-path=data/events.db",
-        "--output-json-path=data/output.json",
+        // "--output-json-path=data/output.json",
+        "--output-xml-path=data/output.xml",
       ]
     }
   ]
