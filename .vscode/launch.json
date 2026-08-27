@@ -1,0 +1,34 @@
+{
+  "configurations": [
+    {
+      "name": "server",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "gtest_stream_server.py",
+      "console": "integratedTerminal",
+      "args": [
+        // "--help",
+        "--log_level=DEBUG",
+        // "--host", "localhost",
+        // "--port", "8080",
+        "--jsonl",
+        "--sqlite-db",
+      ]
+    },
+    {
+      "name": "process_events",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "process_events.py",
+      "console": "integratedTerminal",
+      "args": [
+        // "--help",
+        // "--log_level=DEBUG",
+        // "--jsonl-path=data/events.jsonl",
+        "--db-path=data/events.db",
+        // "--output-json-path=data/output.json",
+        "--output-xml-path=data/output.xml",
+      ]
+    }
+  ]
+}
