@@ -1,6 +1,6 @@
 # GoogleTest Streaming Receiver
 
-This project accepts raw GoogleTest streaming TCP events, stores the raw event data, and can rebuild a structured JSON/XML model from that stream.
+This project focuses on GoogleTest streaming TCP events, where the events are stored and rebuilt in a structured JSON/XML model from that stream.
 
 ## Overview
 
